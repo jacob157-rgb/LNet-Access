@@ -1,5 +1,5 @@
 # Multi-stage production build for MikroTik RouterOS Container (x86_64 / amd64)
-FROM php:8.3-fpm-alpine AS production
+FROM php:8.4-fpm-alpine AS production
 
 LABEL maintainer="LNet-Access"
 LABEL description="Optimized LNet-Access Container for MikroTik RouterOS"
