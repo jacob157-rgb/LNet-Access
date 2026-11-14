@@ -34,10 +34,14 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install NPM dependencies and build assets
+      - name: Ensure assets are built
         run: |
-          npm ci
-          node node_modules/vite-plus/bin/vp build || npm run build
+          if [ ! -f "public/build/manifest.json" ]; then
+            npm install
+            npm run build
+          else
+            echo "Pre-built production assets found in public/build."
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
