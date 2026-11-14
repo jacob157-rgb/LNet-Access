@@ -1,0 +1,1100 @@
+L-Net Access — Product Requirements & Technical Design
+
+  Product: L-Net Access
+  Tagline: Hotspot, Voucher Sales & PPPoE Management
+  Document type: PRD + Technical Implementation Brief
+  Target: Antigravity / AI coding agent
+  Backend: Laravel
+  Primary integration: MikroTik RouterOS API over API-SSL
+  Status: Initial product specification
+
+------------------------------------------------------------------------
+
+1. Product overview
+
+L-Net Access is a self-hosted web application for managing MikroTik Hotspot vouchers, voucher sales, member accounts, PPPoE accounts, access-point monitoring, printing, and RouterOS data consistency.
+
+The application is intended to replace the operational workflow currently handled by Mikhmon, while avoiding the need to generate and maintain a separate RouterOS script for every Hotspot user.
+
+Core design principle: Laravel owns the business layer and the mapping between people, accounts, vouchers, sales, access points, and historical records. MikroTik remains responsible for network authentication and live session state. Laravel periodically reads RouterOS, performs changes only when requested, and compares the router state with its own records.
+
+Main goals
+
+1.  Read existing Hotspot profiles from MikroTik and use them when generating vouchers. Do not silently create or modify profiles.
+2.  Generate one or many vouchers in a controlled, auditable way.
+3.  Record voucher sales, cashier/operator, price, payment method, and which vouchers were sold.
+4.  Provide dedicated print pages for voucher tickets and sales receipts, including QR codes.
+5.  Monitor live Hotspot and PPPoE sessions, router health, and low-cost/unmanaged AP health using ping or HTTP checks. Map clients to an AP only when the MikroTik bridge topology provides reliable evidence.
+6.  Manage members and their Hotspot or PPPoE accounts without treating a MAC address as the member's permanent identity.
+7.  Detect missing, changed, duplicated, or out-of-sync RouterOS records and provide safe repair tools.
+8.  Keep the MikroTik workload low: no per-user scripts, schedulers, or continuous per-user polling.
+
+Non-goals for the first release
+
+-   Replacing Winbox or becoming a complete RouterOS configuration manager.
+-   Editing firewall, NAT, bridge, VLAN, routing, queue-tree, or wireless configuration beyond explicitly approved integration settings.
+-   Automatically changing RouterOS profiles to match Laravel.
+-   Treating MAC address as proof of a person's identity or as a permanent device identifier.
+-   Building a full RADIUS server in the first release. Keep the integration layer extensible for a future FreeRADIUS option.
+-   Automatically charging customers through a payment gateway. Record cash/manual/transfer/QRIS payment status first; gateway integration can be added later.
+
+------------------------------------------------------------------------
+
+2. Product terminology
+
+  Term                Meaning
+  ------------------- ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  Router              A MikroTik RouterOS device connected to the application.
+  Hotspot profile     An existing /ip/hotspot/user/profile record on the router.
+  Voucher             A Hotspot username/password issued from a selected existing profile.
+  Member              A person or customer record in Laravel. A member may own more than one network account.
+  Network account     A RouterOS Hotspot user or PPP/PPPoE secret associated with a member.
+  Session             A live authenticated Hotspot or PPP session observed from RouterOS.
+  Access point (AP)   A low-cost or managed wireless device registered in Laravel by a manually assigned label and management IP. It does not need a controller, SNMP, CAPsMAN, or a client-list API.
+  AP health check     A Laravel-originated ICMP ping, HTTP(S) GET, or optional TCP connection test against the AP management address.
+  AP-client mapping   A best-effort association between a live Hotspot client MAC and an AP, inferred from MikroTik bridge host-table learning and known physical topology. It must carry a confidence/source label.
+  MAC observation     A MAC address seen in a session, DHCP/ARP table, or bridge host table. It is an observation, not a permanent identity.
+  Reconciliation      Comparing Laravel's expected records with the actual RouterOS state and classifying differences.
+
+------------------------------------------------------------------------
+
+3. Recommended connection method
+
+Primary: RouterOS API over API-SSL (TCP 8729)
+
+Use the native RouterOS API protocol over its secure service as the primary integration. It is the best default for this application because it exposes RouterOS menu operations directly, supports read/write operations, and is available across RouterOS generations more broadly than REST.
+
+-   Connect from the Laravel server directly to the router's LAN management IP.
+-   Use TCP 8729 (API-SSL), with a certificate configured on the router and certificate verification enabled in production.
+-   Restrict the RouterOS service to the Laravel server's management IP/subnet using the RouterOS service address restriction and firewall rules.
+-   Create a dedicated RouterOS account for this application. Do not use the router's admin account.
+-   Give the account only the policies required for API access, reading, and the specific write actions the app needs. Validate the exact policy requirements against the installed RouterOS version. Do not grant unrelated permissions such as reboot, sniff, FTP, or broad user administration unless a tested feature requires them.
+-   Store credentials encrypted at rest in Laravel. Never expose them to browser JavaScript, logs, or exception pages.
+
+Do not use plain API TCP 8728 in production. It is unencrypted. It may exist as an explicitly disabled-by-default fallback for a trusted isolated management network, but the application must display a security warning if it is enabled.
+
+Optional fallback: RouterOS REST API over HTTPS
+
+REST can be implemented as a second transport adapter when the router runs a compatible RouterOS v7 release and www-ssl is configured. It is JSON-based and convenient, but it should not be the only supported transport because it is not available on older RouterOS versions and depends on the web service.
+
+-   Require HTTPS (www-ssl), never plain HTTP www in production.
+-   Verify the router certificate. Do not permanently disable TLS verification to make a self-signed certificate work; install the correct CA/certificate trust instead.
+-   Detect REST capability during connection testing and show it in the router capability report.
+
+SSH: secondary diagnostic tool only
+
+Do not use SSH as the normal CRUD or polling mechanism. SSH/CLI parsing is more fragile than the API and risks coupling the application to human-readable terminal output. It may be used by an administrator for diagnostics or an explicitly designed import/export tool, but not for every background sync.
+
+Required abstraction
+
+Create a transport interface such as RouterOsTransportInterface and adapters:
+
+-   RouterOsApiSslTransport — required, primary.
+-   RouterOsRestTransport — optional, later or when proven useful.
+
+All business services must use the interface, not directly instantiate a third-party RouterOS client. The application must be able to switch transport without rewriting voucher, member, monitoring, or reconciliation logic.
+
+Initial connection wizard
+
+The wizard must:
+
+1.  Collect router label, management IP/hostname, API-SSL port, username, password, and certificate verification setting.
+2.  Test network reachability and authentication separately.
+3.  Read /system/identity, /system/resource, RouterOS version, and relevant menu capabilities.
+4.  Detect Hotspot profiles, PPP profiles, Hotspot server entries, bridge host-table availability, and relevant RouterOS menu capabilities. Wireless package/CAPsMAN detection is optional and must not be a prerequisite.
+5.  Display a read-only capability report before enabling write operations.
+6.  Allow a test read and a test write only against an explicitly selected disposable/test record. Never create a hidden test user in a production router.
+
+------------------------------------------------------------------------
+
+4. Random/private MAC strategy — important
+
+Problem
+
+Modern phones can use private/randomized Wi-Fi MAC addresses. Android 10 and later use randomized MAC by default, while Apple devices support private addresses that can be fixed or rotated depending on settings and network conditions. A device may therefore appear under a different MAC address after a network reset, privacy setting change, or rotation interval.
+
+A MAC address must not be the primary key for a member, voucher, or customer device. Do not design the application around the assumption that one physical phone always has one permanent Wi-Fi MAC.
+
+Required solution
+
+1.  Member identity is the Laravel member_id. A name, phone number, or optional customer code belongs to the member record.
+2.  Network identity is the account username. Hotspot voucher username or PPPoE username is the stable account identity.
+3.  A session is associated with a member through its RouterOS account, not by looking up a MAC address.
+4.  MAC addresses are stored only as time-stamped observations (first_seen_at, last_seen_at, AP, IP, and source). They can help troubleshooting and current-session correlation.
+5.  Never automatically merge two members because their MAC addresses match. Never assume two different MAC addresses mean two different people.
+6.  Do not require a hardware MAC or use MAC address as the default login credential.
+7.  Do not make mac-cookie, MAC-authentication, or a fixed caller-id the main member identity mechanism. They may be optional router policies for special use cases, but must not be prerequisites for normal login.
+
+How to support repeat customers
+
+-   A member can have one or more stable Hotspot/PPPoE accounts.
+-   The customer logs in using the voucher/account username and password or an approved QR login flow.
+-   If a profile allows only one concurrent login, set/retain shared-users=1 in that existing profile. If a product intentionally supports multiple devices, use the profile's configured shared-users value or a separate suitable profile.
+-   If a phone's private MAC changes, the user can still authenticate with the same account. The new session is mapped by username to the same member.
+-   For PPPoE, use the PPP username as the identity. Do not pin a PPPoE secret to a caller-id MAC unless the operator intentionally wants a device lock and understands that private MAC changes may break it.
+
+UI treatment
+
+Show MAC as a secondary technical attribute with labels such as Observed MAC or Current session MAC. Do not label it Device ID. A member device history must be marked as observed/unverified unless the customer explicitly confirms the binding.
+
+------------------------------------------------------------------------
+
+5. Functional modules
+
+5.1 Dashboard / Network overview
+
+Show only useful, live or time-stamped data:
+
+-   Router connectivity: Online, Offline, or Stale.
+-   RouterOS version, uptime, CPU load, free memory, and last successful sync.
+-   Current Hotspot active sessions.
+-   Current PPPoE active sessions.
+-   AP reachability and response time from ping/HTTP health checks.
+-   Client-to-AP association only where bridge host-table data and physical topology make it reliable; otherwise show Unknown AP rather than guessing.
+-   Vouchers available, sold, active, expired, disabled, and out-of-sync.
+-   Sales today and current cashier shift total (if cashier shifts are enabled).
+-   Recent sync errors and important audit events.
+
+Every live metric must display its last-updated time. If a sync is stale, display Stale rather than presenting old information as live.
+
+5.2 Hotspot profile browser
+
+-   Read profiles from /ip/hotspot/user/profile.
+-   Display profile name and available parameters such as rate limit, shared users, session timeout, idle timeout, and other relevant limits returned by the router.
+-   Profiles are read-only in the initial release.
+-   Voucher generation must select a profile that currently exists on the router.
+-   If a previously selected profile has been deleted or renamed on the router, prevent new voucher generation using it and flag affected unsold vouchers.
+-   Do not silently fall back to the default profile.
+
+5.3 Voucher generator
+
+Required features:
+
+-   Select an existing Hotspot profile.
+-   Generate one voucher or a bulk quantity.
+-   Support generated username/password or username-only where the operator explicitly configures that policy.
+-   Configurable prefix, length, character set, and batch label.
+-   Prevent ambiguous characters when desired (O/0, I/l/1).
+-   Check uniqueness against both Laravel records and current RouterOS users before provisioning.
+-   Allow optional customer/member assignment and internal notes.
+-   Allow price to be defined by a price list, but do not assume RouterOS profile is the same thing as a sale price.
+-   Show a preview of quantity, profile, generated codes, and total estimated value before committing.
+-   Provide idempotent retry when the router connection is lost during provisioning.
+
+Provisioning sequence:
+
+1.  Validate that the profile still exists on the selected router.
+2.  Reserve the generated usernames in Laravel with a unique constraint.
+3.  Create a provisioning batch and queue the RouterOS operation.
+4.  Add the Hotspot users through the API in controlled batches. Each app-owned RouterOS user must receive a comment marker such as lnet-access:<UUID>.
+5.  Read back the created records and verify username, profile, and marker.
+6.  Mark the local vouchers ready only after verification succeeds.
+7.  If provisioning partially fails, preserve successful records, mark failed ones clearly, and allow a safe retry. Never blindly re-add already created usernames.
+
+Do not generate a RouterOS script, scheduler, or on-login script for every voucher. A simple comment marker is sufficient for identifying app-owned records.
+
+5.4 Voucher inventory and lifecycle
+
+Suggested states:
+
+-   draft — generated locally, not sent to RouterOS.
+-   provisioning — RouterOS create operation in progress.
+-   ready — verified on RouterOS and available for sale.
+-   reserved — temporarily allocated to a sale but not paid/confirmed.
+-   sold — sale confirmed.
+-   active — currently has an active Hotspot session (operational state; retain sold state separately if needed).
+-   expired — expired or no longer usable according to known RouterOS status/limits.
+-   disabled — disabled intentionally.
+-   missing — expected app-owned user cannot be found on RouterOS.
+-   conflict — a same-name record exists but does not match the expected marker/details.
+
+Do not use one status column to mix commercial state and live session state. Prefer separate commercial_status and router_status/is_active_session fields.
+
+Voucher details should include router, RouterOS internal ID (when available), app UUID, username, encrypted password, profile name, timestamps, sale reference, batch reference, notes, and last reconciliation result. Passwords must be encrypted at rest and masked by default. Revealing or reprinting credentials must be permission-controlled and audited.
+
+5.5 Sales / cashier
+
+Required sale flow:
+
+1.  Operator selects one or more ready vouchers or selects a product/price rule that allocates ready vouchers from a profile.
+2.  Application calculates subtotal, discounts (optional), and total.
+3.  Operator selects payment method: cash, bank transfer, QRIS/manual, or other configurable method.
+4.  Operator confirms payment status: paid, pending, or void. Do not mark a sale paid automatically unless payment proof or a future gateway integration confirms it.
+5.  Application records cashier, customer/member if known, date/time, payment method, sale items, and voucher allocation.
+6.  Sale completion opens the print/reprint page.
+
+Include:
+
+-   Sales list with date, receipt number, cashier, customer, total, payment status, and voucher count.
+-   Sale detail and voucher allocation.
+-   Void/refund flow with reason and audit event.
+-   Reprint action with reprint log.
+-   Optional cashier shift open/close and cash reconciliation.
+
+Use database transactions for local sale records. Since RouterOS and the database cannot share one ACID transaction, use an outbox/saga-style workflow and explicit provisioning/payment statuses. Never claim a sale or voucher is complete while RouterOS provisioning is still pending.
+
+5.6 Printing pages
+
+Create dedicated print routes/pages rather than trying to print the dashboard UI.
+
+Required layouts:
+
+-   Thermal 58 mm: compact voucher ticket and compact receipt.
+-   A4: multiple vouchers per sheet with configurable grid and cut lines.
+-   Browser print: use window.print() from an explicit Print button and CSS @media print rules. No printer-driver integration is required for the first release.
+
+A voucher ticket should support:
+
+-   L-Net branding and business contact/configuration.
+-   Profile/package name.
+-   Username and password in readable type.
+-   QR code.
+-   Expiry/validity information only when known; do not invent an expiry date from a profile label.
+-   Price, receipt/batch reference, and optional short instructions.
+
+A receipt should include receipt number, date/time, cashier, items, quantity, price, discounts, total, payment method/status, and a small footer.
+
+Print requirements:
+
+-   Print stylesheet hides navigation, buttons, and irrelevant screen controls.
+-   Use correct physical dimensions and page margins for 58 mm and A4.
+-   Avoid forced background colors that waste thermal paper.
+-   Provide a preview before printing.
+-   Reprint must not regenerate a voucher or change its password.
+-   Log who reprinted and when.
+-   QR content must be explicitly configured; never encode router admin credentials or application secrets.
+
+Suggested routes:
+
+-   /print/vouchers/{batch}
+-   /print/sales/{sale}
+-   /print/voucher/{voucher}
+
+5.7 QR login
+
+Support two distinct QR use cases and label them clearly:
+
+A. Voucher display QR (MVP):
+
+-   QR contains an opaque application voucher URL or a compact voucher payload according to the configured security policy.
+-   The landing page displays the voucher details to an authorized viewer or customer.
+-   Do not put the raw password in a URL query string, analytics event, server access log, or public predictable ID.
+
+B. One-time QR login (target feature):
+
+-   QR contains a cryptographically random, opaque, single-use token; never the raw username/password.
+-   Store only a hash of the token in Laravel.
+-   Token expires quickly (default 3–5 minutes), is invalidated immediately after successful redemption, and is rate-limited.
+-   The portal endpoint must be reachable before Hotspot authentication, using a narrowly scoped Hotspot walled-garden allowance for the portal host/IP.
+-   Implement this through a dedicated customized RouterOS Hotspot login.html integration. The router's captive-portal context provides login URL and challenge variables; the portal adapter must preserve the selected RouterOS authentication method. For http-chap, the page must perform the RouterOS-required challenge response correctly. Prefer a valid HTTPS Hotspot certificate and HTTPS login flow where possible. Never silently downgrade to plain-text http-pap.
+-   On token redemption, the application performs an atomic one-time claim and returns only the short-lived login assertion/credentials needed by the captive-portal form. Do not persist credentials in browser local storage.
+-   Preserve the original destination URL and show a clear success/failure state.
+-   If the router's captive-portal method cannot safely support automatic QR login, ship the QR landing page as a voucher viewer first and keep auto-login behind a feature flag until tested on real Android/iOS devices.
+
+The QR flow must be tested with Android, iOS, and common captive-network browser behavior. Do not claim zero-touch login until that integration has been verified on the actual RouterOS version and hotspot HTML files.
+
+5.8 Member management
+
+Member record fields:
+
+-   Member code (generated by Laravel).
+-   Name / display name.
+-   Phone/contact (optional).
+-   Notes.
+-   Status: active, suspended, archived.
+-   Created/updated timestamps.
+
+A member can have multiple network accounts:
+
+-   Hotspot account(s).
+-   PPPoE account(s).
+
+Member page should show:
+
+-   Account list and account type.
+-   Profile/package, router, username, and status.
+-   Current session (if active).
+-   Voucher/sales history.
+-   Last-seen timestamp.
+-   MAC observations as technical history, not identity.
+-   Audit history of resets, password changes, disables, and session disconnects.
+
+Avoid an ambiguous single Reset Member button. Provide explicit actions:
+
+-   Disconnect current Hotspot session.
+-   Disconnect current PPPoE session.
+-   Change/reset account password.
+-   Disable/enable network account.
+-   Clear an optional device restriction only after explicit confirmation.
+
+Every action must show the exact account and router being changed, require confirmation for destructive/disruptive changes, and write an audit event.
+
+5.9 PPPoE management
+
+Read existing profiles and accounts from:
+
+-   /ppp/profile — profile list.
+-   /ppp/secret — local PPP credentials.
+-   /ppp/active — active sessions.
+
+Features:
+
+-   List/search/filter PPPoE accounts.
+-   Create or edit PPPoE secret using an existing PPP profile.
+-   Enable/disable account.
+-   Reset password (never reveal an existing password from the router by default).
+-   Disconnect one exact active session using its RouterOS internal session identifier.
+-   View assigned address, service, caller-id (if present), session ID, uptime, and traffic counters when returned by the router.
+-   Assign account to a Laravel member.
+-   Track whether a secret is app-managed, manually imported, missing, or conflicting.
+
+Use the PPP username as the durable account identity. Treat caller-id as an optional restriction, not the primary member key. Do not delete a PPP secret when the operator only intends to disconnect the current session.
+
+5.10 Access point inventory and low-cost AP monitoring
+
+Assumption for this deployment: APs are inexpensive/non-managed models. They may expose only a management web page and/or respond to ping. They are not assumed to support SNMP, CAPsMAN, controller APIs, client association APIs, or RouterOS.
+
+The application must therefore separate two features:
+
+1.  AP health monitoring — reliable and required. Laravel checks whether each AP management address responds.
+2.  Client-to-AP mapping — optional and topology-dependent. Laravel only associates a Hotspot session with an AP when the MikroTik can provide sufficient Layer-2 evidence. Never infer an exact AP merely because a client is online.
+
+AP inventory fields
+
+Store the following per AP:
+
+-   AP display name, location/area, optional notes, enabled state.
+-   Management IP/hostname and optional management MAC.
+-   Health-check type: icmp, http, https, or tcp.
+-   HTTP URL/path and expected status code(s), where applicable; otherwise TCP port.
+-   Timeout, polling interval, consecutive-failure threshold, last checked time, last successful time, last response time, last status code, and last error.
+-   Router connection reference and optional MikroTik bridge name / bridge port interface name.
+-   Topology mode: bridged_dedicated_port, bridged_shared_uplink, router_nat, or unknown.
+-   Client-mapping capability and confidence: reliable, approximate, or unavailable.
+
+Use a static/reserved management IP for each AP. The application should allow a manual AP inventory entry even when the AP cannot be discovered automatically.
+
+AP health checks
+
+Run checks from the Laravel server because it is on the same LAN as the MikroTik/APs. Do not require scripts, agents, SNMP, or configuration changes on the AP.
+
+-   icmp: send a bounded ping probe to the AP management IP.
+-   http / https: perform a GET to a configured management/health URL and record the response code and latency. Do not assume every router-style login page provides a true health endpoint; label this as HTTP reachable, not AP fully healthy.
+-   tcp (optional): test whether a configured management port accepts a connection.
+-   Use configurable timeout and interval, with a small number of consecutive failures before declaring Offline to reduce false alarms.
+-   Status values: Online, Degraded, Offline, Unknown, and Stale. Unknown means no trustworthy probe result exists yet; Stale means the last probe is too old.
+-   A ping timeout alone may mean ICMP is blocked. Allow HTTP/HTTPS or TCP as the health check instead. A successful ping proves IP reachability only, not that Wi-Fi service or internet access is working.
+-   Keep per-check history and response latency/loss for troubleshooting. Do not write health-check results into RouterOS or create one Netwatch/script per AP by default.
+-   Validate configured targets as private/LAN destinations and restrict protocols/ports to prevent the monitoring feature becoming an SSRF or network-scanning proxy.
+
+Optional AP-client mapping through MikroTik bridge host table
+
+The first implementation should inspect the MikroTik bridge host table, /interface/bridge/host, and use its mac-address and on-interface fields where available. The host table reports which bridge port a MAC was learned on; it does not identify the Wi-Fi AP by itself. RouterOS Bridge and Switching documentation
+
+Mapping can be considered reliable only when all of these conditions are met:
+
+1.  The client device is bridged through the inexpensive AP (AP operates as a transparent bridge/access point, not router/NAT mode).
+2.  Client source MAC addresses are forwarded to the MikroTik, so the bridge host table can learn them.
+3.  Each AP has a dedicated MikroTik-facing bridge port, or another topology arrangement that uniquely identifies its upstream path.
+4.  The current Hotspot session MAC matches a recently learned bridge-host MAC on that AP's known bridge port.
+
+Important limitations:
+
+-   If multiple APs connect behind the same unmanaged switch and share one MikroTik uplink, the router will usually see the same upstream bridge port for all client MACs. It cannot reliably tell which AP a client is using. Mark the AP mapping Unknown or Shared uplink; do not pick an AP at random.
+-   If an AP runs router/NAT mode, the MikroTik may see only the AP's WAN/uplink identity or translated client traffic. Per-client AP mapping is generally unavailable from the gateway alone.
+-   A DHCP lease or ARP entry can help correlate IP-to-MAC, but does not by itself reveal which AP a client is attached to.
+-   Random/private MAC is not a blocker for a live-session observation: the current randomized MAC can still be observed as the session MAC and looked up in the bridge host table. It must not be treated as a permanent device identity.
+-   If no supported mapping evidence exists, still show the Hotspot session normally and show AP: Unknown; do not hide the session or invent a location.
+
+For each current mapping observation, store source (bridge_host), bridge name, learned on_interface, AP inventory ID if resolved, observed MAC, observed time, and confidence (reliable, approximate, unknown). Expire or replace the association when the bridge-host entry/session becomes stale.
+
+Monitoring UI
+
+-   AP inventory table: name, area, management IP, check method, status, latency, last checked, and last error.
+-   AP detail: health-check history and topology configuration.
+-   Optional client count per AP only when there is reliable client-to-AP mapping. Never count Unknown AP sessions under an arbitrary AP.
+-   Hotspot session table: username/member, IP, observed MAC, AP name or Unknown AP, mapping confidence/source, session uptime, and last update.
+-   Filters by AP, area, profile, active status, and observed MAC.
+-   Provide a manual Test now action and a separate Refresh RouterOS bridge hosts action with last-sync timestamps.
+
+5.11 Monitoring and operational health
+
+Monitor the following RouterOS state:
+
+-   /system/resource and /system/identity.
+-   Hotspot user/profile/active/host tables.
+-   PPP secret/profile/active tables.
+-   /interface/bridge/host for optional MAC-to-bridge-port observations.
+-   AP management IP health checks performed by Laravel (ICMP ping, HTTP/HTTPS GET, or optional TCP check). Wireless registration tables are optional integrations only if a future AP actually exposes them; do not make them required.
+
+Display:
+
+-   CPU/memory/uptime and RouterOS version.
+-   API connection health and response latency.
+-   Active Hotspot/PPPoE session counts.
+-   AP health status, response latency, and last-check age.
+-   Hotspot sessions mapped to AP only when topology evidence is reliable; otherwise count them under Unknown AP.
+-   Last successful full inventory sync and last live-session poll.
+-   Latest reconciliation warnings/errors.
+
+A router that has not been polled within the configured freshness threshold must show Stale or Offline; do not show old data as real-time.
+
+------------------------------------------------------------------------
+
+6. Laravel architecture
+
+Prefer a Laravel monolith for the first release. Avoid premature microservices.
+
+Suggested stack
+
+-   Laravel (use the current stable release compatible with the PHP version deployed on the server; do not hardcode a framework version before inspecting the target environment).
+-   PHP with a supported version for the selected Laravel release.
+-   MySQL 8.x or PostgreSQL for persistent application data.
+-   Redis for queues, cache, and per-router locks (database queue is acceptable for an early prototype but Redis is preferred for production polling).
+-   Laravel Scheduler for periodic sync dispatch.
+-   Laravel Queue workers for RouterOS I/O.
+-   Inertia + React + TypeScript, or the existing frontend stack if the repository already has one. Do not replace a working stack without a reason.
+-   Tailwind CSS with a small application-specific design system.
+-   Server-side QR generation library and a maintained PHP RouterOS client library behind the transport interface.
+
+Logical architecture
+
+    Browser (Admin / Cashier)
+              |
+              v
+    Laravel Web UI + Controllers + Form Requests
+              |
+              +---- Business Services
+              |       +-- VoucherService
+              |       +-- SalesService
+              |       +-- MemberService
+              |       +-- PppoeService
+              |       +-- MonitoringService
+              |       +-- ReconciliationService
+              |       +-- PrintService / QrLoginService
+              |
+              +---- Application Database
+              |       +-- Members / Accounts / Vouchers / Sales
+              |       +-- Router Mirrors / Sessions / AP Inventory
+              |       +-- Sync Runs / Audit Logs / QR Tokens
+              |
+              +---- Queue + Scheduler
+                      |
+                      v
+              RouterOsTransportInterface
+                      |
+              +-------+------------------+
+              |                          |
+              v                          v
+       API-SSL (8729)               REST over HTTPS
+       Primary                      Optional
+              |
+              v
+       MikroTik RouterOS + low-cost APs (ping/HTTP health checks)
+
+Suggested service boundaries
+
+-   RouterConnectionService: test connections, discover capabilities, manage safe connection state.
+-   RouterOsReadService: normalized read-only access to router records.
+-   RouterOsWriteService: validated and audited create/update/disable/disconnect operations.
+-   HotspotProfileService: read/cache existing profiles.
+-   VoucherProvisioningService: reserve identifiers, create users, verify results, retry safely.
+-   SalesService: transactions, item allocations, payment status, void/refund.
+-   MemberService: member/account relationships.
+-   PppoeAccountService: PPP secret/profile/session operations.
+-   AccessPointHealthCheckService: run ICMP/HTTP(S)/TCP checks from Laravel and persist AP health history.
+-   BridgeHostMappingService: correlate current Hotspot session MACs with /interface/bridge/host entries and configured bridge-port-to-AP mappings; return Unknown AP when evidence is insufficient.
+-   ReconciliationService: diff local expected state against router state.
+-   QrLoginService: issue, expire, redeem, and audit one-time QR tokens.
+-   PrintService: ticket/receipt data preparation. Templates remain separate from domain services.
+
+RouterOS client library rule
+
+Before choosing a package, inspect maintenance activity, supported PHP versions, RouterOS API protocol support, API-SSL support, query/filter support, and error handling. Wrap the package in the adapter. Do not let package-specific response formats leak into controllers or database models.
+
+------------------------------------------------------------------------
+
+7. Data model proposal
+
+Use normal relational tables and foreign keys. Names below are suggestions; adapt to existing repository conventions.
+
+Core tables
+
+router_connections
+
+-   id, name, host, port, transport, username, password_encrypted
+-   tls_verify, ca_certificate_path or certificate reference
+-   routeros_version, router_identity, board_name
+-   connection_status, last_seen_at, last_sync_at, last_error
+-   capabilities_json, timestamps
+
+members
+
+-   id, member_code (unique), name, phone (nullable), notes (nullable)
+-   status, timestamps, deleted_at if soft delete is appropriate
+
+network_accounts
+
+Represents a local RouterOS account associated with a member.
+
+-   id, member_id (nullable for anonymous/stock vouchers), router_connection_id
+-   account_type (hotspot or pppoe)
+-   username, password_encrypted (nullable when not managed/recoverable)
+-   profile_name, router_object_id, app_uuid (unique per router)
+-   managed_by_app, expected_enabled, last_router_state, last_seen_at
+-   created_at, updated_at
+
+Add a unique constraint suitable for account type + router + username. Do not use MAC as a unique key.
+
+hotspot_profiles
+
+-   id, router_connection_id, router_object_id, name
+-   rate_limit, shared_users, session_timeout, idle_timeout
+-   raw_attributes_json, last_synced_at, is_present
+
+ppp_profiles
+
+-   id, router_connection_id, router_object_id, name
+-   selected normalized profile properties, raw_attributes_json, last_synced_at, is_present
+
+vouchers
+
+-   id, uuid, router_connection_id, network_account_id (nullable)
+-   batch_id, hotspot_profile_id, username, password_encrypted
+-   commercial_status, router_status, price_snapshot, currency
+-   generated_at, provisioned_at, sold_at, expires_at (nullable)
+-   router_object_id, router_comment_marker, last_reconciled_at
+-   notes, timestamps
+
+voucher_batches
+
+-   id, batch_code, router_connection_id, hotspot_profile_id
+-   quantity_requested, quantity_created, status, created_by, timestamps
+
+sales
+
+-   id, receipt_number (unique), member_id (nullable), cashier_id
+-   subtotal, discount_total, grand_total, currency
+-   payment_method, payment_status, paid_at, voided_at, void_reason
+-   notes, timestamps
+
+sale_items
+
+-   id, sale_id, item_type, description, quantity, unit_price, line_total
+
+sale_vouchers
+
+-   id, sale_id, voucher_id, price_snapshot, timestamps
+-   Unique voucher allocation constraint where a voucher cannot be sold twice unless a prior sale has been properly voided/released.
+
+router_sessions
+
+Historical snapshots/observations, not the source of truth for the current live session.
+
+-   id, router_connection_id, account_type, username, router_session_id
+-   ip_address, observed_mac, server_name, interface_name, ap_id (nullable)
+-   uptime_seconds, byte counters, started_at (if known), observed_at, ended_at (nullable)
+-   raw_attributes_json
+
+access_points
+
+-   id, name, location, notes, management_router_id (nullable)
+-   management_ip, management_mac (nullable)
+-   health_check_type (icmp, http, https, tcp), health_check_url (nullable), health_check_port (nullable), expected_http_statuses_json (nullable)
+-   check_interval_seconds, timeout_ms, failure_threshold, status, last_checked_at, last_success_at, last_response_ms, last_http_status, last_error
+-   topology_mode (bridged_dedicated_port, bridged_shared_uplink, router_nat, unknown)
+-   router_bridge_name (nullable), router_bridge_port (nullable), client_mapping_capability (reliable, approximate, unavailable)
+-   timestamps
+
+access_point_health_checks
+
+-   id, access_point_id, check_type, status, response_ms (nullable), http_status (nullable), packet_loss_percent (nullable), error_message (nullable), checked_at
+
+access_point_radios (optional future integration)
+
+Only add radio/BSSID details when an AP or controller actually exposes them. Do not require an access_point_radios record for basic ping/HTTP monitoring.
+
+-   id, access_point_id, interface_name, radio_mac / bssid
+-   ssid, band, channel (nullable), last_seen_at (nullable)
+
+mac_observations
+
+-   id, member_id (nullable), network_account_id (nullable), router_connection_id
+-   observed_mac, source (hotspot_active, bridge_host, dhcp, arp, ppp_caller_id, etc.)
+-   ap_id (nullable), router_bridge_name (nullable), router_bridge_port (nullable), ip_address (nullable), first_seen_at, last_seen_at
+-   confidence (reliable, approximate, unknown, manually_confirmed, unverified)
+
+sync_runs
+
+-   id, router_connection_id, sync_type, status, started_at, finished_at
+-   records_read, records_created, records_updated, records_missing, error_summary, details_json
+
+reconciliation_issues
+
+-   id, router_connection_id, entity_type, local_entity_id, router_object_id
+-   issue_type (missing_on_router, unexpected_on_router, attribute_mismatch, duplicate_username, profile_missing, unknown_owner)
+-   severity, expected_json, actual_json, status, resolution_note, timestamps
+
+audit_logs
+
+-   id, actor_id, action, entity_type, entity_id, router_connection_id (nullable)
+-   before_json, after_json, ip_address, user_agent, created_at
+
+qr_login_tokens
+
+-   id, token_hash, voucher_id, router_connection_id, expires_at, redeemed_at
+-   redeemed_session_reference (nullable), attempt_count, created_by, timestamps
+
+Important data rules
+
+-   Encrypt RouterOS passwords and voucher/PPPoE credentials at rest using Laravel's encryption facilities or an application-managed envelope-encryption key. Keep encryption keys outside source control.
+-   Passwords must never be returned in normal list API responses.
+-   Do not log credential values, QR tokens, or authorization headers.
+-   Use UUID/app marker in RouterOS comments so reconciliation can identify records created by L-Net Access. Comments are identifiers, not secrets.
+-   Preserve raw RouterOS attributes for troubleshooting, but sanitize sensitive keys before storing or logging.
+-   Use soft deletes or archival for business records; avoid destructive deletion of historical sales, vouchers, or audit data.
+
+------------------------------------------------------------------------
+
+8. Reconciliation and sync design
+
+This is one of the most important parts of the product.
+
+Source-of-truth policy
+
+  Data                                                                         Primary source of truth
+  ---------------------------------------------------------------------------- -----------------------------------------------------------------------------------------------------
+  Member profile, cashier, sale, receipt, price, voucher ownership             Laravel
+  Actual RouterOS user existence, profile assignment, enabled/disabled state   MikroTik
+  Live authenticated sessions                                                  MikroTik
+  Historical sales and reprints                                                Laravel
+  AP inventory labels and business location names                              Laravel, with RouterOS-derived metadata as supporting data
+  AP reachability/status                                                       Laravel-originated ping/HTTP(S)/TCP health checks to each AP management IP
+  Observed MAC-to-AP association for the current session                       RouterOS bridge host table + known physical topology; optional and confidence-scored, never assumed
+
+Sync frequency defaults
+
+Make all intervals configurable per router. Suggested initial values:
+
+-   Router health (/system/resource, identity): every 60 seconds.
+-   Live Hotspot and PPP active sessions: every 30–60 seconds.
+-   Bridge host table: every 30–60 seconds only when AP-client mapping is enabled and the router topology can expose useful bridge-port data.
+-   AP health checks: every 30–60 seconds by default, configurable per AP; run from Laravel and do not create RouterOS Netwatch entries by default.
+-   Full account/profile inventory: every 5–15 minutes, or on-demand after a user action.
+-   Reconciliation: every 5–15 minutes, or on-demand.
+
+These are application polling jobs, not RouterOS scripts. Do not poll every user separately. Use one bulk read per relevant RouterOS menu, normalize the response, and compare it in Laravel.
+
+Scheduler and queue rules
+
+-   Laravel Scheduler dispatches jobs; queue workers perform router I/O.
+-   Use one lock per router and sync type to prevent overlapping poll jobs.
+-   Use a configurable per-router concurrency limit (default 1 write operation at a time).
+-   Use request timeouts, bounded retries, and exponential backoff.
+-   Do not retry a non-idempotent write blindly. Check whether the object already exists using the unique username and app UUID marker before retrying.
+-   Keep a short live-session snapshot cache; do not write excessively large duplicate snapshots if nothing changes.
+-   If a router is unavailable, mark its state stale/offline and keep historical data. Do not mark every user missing just because a sync failed.
+
+Reconciliation statuses
+
+-   in_sync: local record and router record agree.
+-   missing_on_router: an app-managed account is expected but not present on the router.
+-   unexpected_on_router: a router account is not mapped to a Laravel account.
+-   attribute_mismatch: profile, comment marker, enabled state, or another tracked attribute differs.
+-   profile_missing: the profile used by a voucher/account no longer exists.
+-   duplicate_or_conflict: username collision or an object with an unexpected marker.
+-   stale: comparison cannot be trusted because the last router sync is too old or failed.
+
+Safe repair workflow
+
+The system must never silently rewrite the router to match Laravel.
+
+1.  Show expected local state and actual router state side by side.
+2.  Explain the impact of each repair action.
+3.  Offer explicit actions: Re-create missing account, Import router account, Update local mapping, Keep as manual, or Ignore until next sync.
+4.  Require confirmation for any RouterOS write.
+5.  Record before/after state and actor in audit_logs.
+6.  Run a targeted read-back after the change and close the issue only after verification.
+
+If the router sync fails, do not offer destructive repair based on incomplete data.
+
+------------------------------------------------------------------------
+
+9. RouterOS menu/API mapping
+
+Treat these as menu paths/capabilities to probe at runtime. Wireless menu availability is optional; the required AP health checks do not depend on AP-side APIs or wireless packages.
+
+  Feature                                                      RouterOS menu path          App use
+  ------------------------------------------------------------ --------------------------- --------------------------------------------------------------------------------------------------
+  Router identity                                              /system/identity            Label/identity confirmation
+  Router resources                                             /system/resource            CPU, memory, uptime, version, health
+  Hotspot profiles                                             /ip/hotspot/user/profile    Existing voucher profile selector
+  Hotspot users                                                /ip/hotspot/user            Voucher create/update/enable/disable and inventory
+  Hotspot active                                               /ip/hotspot/active          Live sessions and disconnect
+  Hotspot hosts                                                /ip/hotspot/host            Unauthenticated/known host observations where needed
+  PPP profiles                                                 /ppp/profile                Existing PPP profile selector
+  PPP secrets                                                  /ppp/secret                 PPPoE account create/update/enable/disable
+  PPP active                                                   /ppp/active                 Live PPPoE sessions and disconnect
+  Bridge host table                                            /interface/bridge/host      Learn MAC-to-bridge-port mapping (mac-address, on-interface) where topology allows AP resolution
+  DHCP leases (optional)                                       /ip/dhcp-server/lease       Supporting IP/MAC observation only; does not identify AP by itself
+  ARP table (optional)                                         /ip/arp                     Supporting IP-to-MAC correlation; does not identify AP by itself
+  Wireless registration tables (optional future integration)   Version/package-dependent   Use only if a future AP/controller exposes it; not required for inexpensive unmanaged APs
+
+Use each record's RouterOS internal .id for a precise update/remove operation after verifying that it still refers to the expected object. Do not assume a row number from CLI output is stable.
+
+------------------------------------------------------------------------
+
+10. UI / UX direction — anti-slop design
+
+The interface should feel like a practical network operations and cashier tool, not a generic AI-generated admin template.
+
+Visual direction
+
+-   Clean, utilitarian, precise, and compact.
+-   Neutral surface palette (off-white/light gray or restrained dark mode) with one restrained accent color based on L-Net branding.
+-   Use typography with clear hierarchy and tabular numerals for IP addresses, usernames, prices, counters, and timestamps.
+-   Use subtle borders and spacing to group content. Avoid excessive rounded cards.
+-   Use semantic color only for real status: green/online, amber/stale/warning, red/offline/error, neutral/disabled.
+-   Use icons only when they clarify an action. Pair important actions with text labels.
+
+Avoid these patterns
+
+-   No oversized gradient hero sections on operational pages.
+-   No glassmorphism, decorative blobs, neon glow, or random background gradients.
+-   No fake charts, fabricated statistics, or decorative dashboard widgets.
+-   No giant cards for every number when a compact status row/table is clearer.
+-   No excessive pills/badges, oversized empty whitespace, or repetitive rounded containers.
+-   No emoji in core navigation or data tables.
+-   No icon-only destructive actions.
+-   No chart that lacks a real source, time range, and explanation.
+
+Layout proposal
+
+Primary navigation:
+
+-   Overview
+-   Hotspot
+    -   Profiles
+    -   Vouchers
+    -   Voucher batches
+    -   Active sessions
+-   Sales
+    -   New sale
+    -   Transactions
+    -   Print history
+-   Members
+-   PPPoE
+    -   Accounts
+    -   Active sessions
+    -   Profiles
+-   Access Points
+-   Reconciliation
+-   Router Connections
+-   Settings / Users / Audit Log
+
+Global header: active router selector, connection state, last sync age, current user, and a small quick-action area.
+
+Dashboard: compact network-health strip at top, operational counts below, then active sessions and recent issues. Prioritize real-time tables over decorative charts.
+
+Voucher workflow: profile and quantity selection first, configuration details second, preview third, provision only after confirmation. Show provisioning progress and partial failures clearly.
+
+Sales screen: fast keyboard-friendly flow for cashier use. Keep voucher selection, total, payment method, and confirm action visible without scrolling on a standard desktop/tablet screen.
+
+Member detail: member information at top; separate tabs/sections for network accounts, sessions, sales/vouchers, MAC observations, and audit history.
+
+Reconciliation screen: table with issue type, router, entity/username, last checked time, expected vs actual values, and explicit repair action.
+
+Responsive behavior
+
+-   Desktop is the primary operations layout.
+-   Tablet should support cashier sales and printing.
+-   Mobile should support read-only monitoring, member lookup, and simple account actions. Do not cram every dense table into tiny cards; provide focused mobile detail views.
+
+Accessibility and interaction quality
+
+-   All form fields need visible labels and validation messages.
+-   Use confirmation dialogs for disruptive operations.
+-   Provide keyboard navigation and visible focus states.
+-   Tables need loading, empty, stale, and error states.
+-   Do not show success until the backend has verified the RouterOS operation.
+-   Use optimistic UI only for local non-critical preferences, not router provisioning or disconnect operations.
+
+------------------------------------------------------------------------
+
+11. Roles and permissions
+
+Initial roles:
+
+-   Administrator: router connections, user/role management, full configuration, reconciliation repairs, audit log.
+-   Operator/Cashier: generate vouchers, create sales, print tickets, search members, view allowed sessions.
+-   Network technician: monitor router/AP/session state, manage Hotspot and PPP accounts, disconnect sessions, resolve reconciliation issues if granted.
+-   Read-only: dashboard, sales reports, and monitoring without write operations.
+
+Use permission checks in controllers/services and in the UI. Hiding a button is not a security boundary. Sensitive credential reveal, reprint, account reset, and router write actions require separate permissions and audit events.
+
+------------------------------------------------------------------------
+
+12. Security requirements
+
+-   The app is intended to run on the same trusted LAN as the MikroTik, but LAN placement alone is not a security control.
+-   Restrict API-SSL to the Laravel host's management IP/subnet.
+-   Use a dedicated low-privilege RouterOS user.
+-   Verify TLS certificates.
+-   Encrypt router credentials and network-account passwords at rest.
+-   Keep .env, encryption keys, and backups out of Git.
+-   Do not return credentials in list endpoints or log them.
+-   Apply authentication, authorization, CSRF protection, validation, rate limiting, and session security to the Laravel app.
+-   QR tokens must be random, hashed at rest, short-lived, single-use, rate-limited, and excluded from access logs where feasible.
+-   Protect public print/QR URLs with unguessable identifiers and the intended access policy.
+-   Audit all RouterOS write actions, credential reveals, print/reprint actions, disconnects, voids, and repair actions.
+-   Never accept arbitrary RouterOS command strings from a browser request. Expose a small allowlisted set of typed operations.
+-   Sanitize and normalize router responses before rendering them.
+-   Provide backup and restore instructions for the Laravel database and application encryption key. Losing the key means encrypted credentials cannot be recovered.
+
+------------------------------------------------------------------------
+
+13. Reliability and performance requirements
+
+-   A normal dashboard load must not initiate a full router inventory sync.
+-   Router I/O must run in queue jobs, not in a long-running HTTP request.
+-   Use bulk reads for active sessions and inventory.
+-   Use cache for frequently requested read-only profile lists and health snapshots.
+-   Apply locks so two voucher batches cannot issue the same username concurrently.
+-   A failed router operation must show an actionable error and preserve local state for safe retry.
+-   Store last successful poll time and distinguish offline from stale.
+-   Support multiple routers/APs in the data model even if the first deployment uses one main router.
+-   Do not run polling jobs for every user; one job polls the full table, then maps results locally.
+
+------------------------------------------------------------------------
+
+14. Routes / screens proposal
+
+Route naming is illustrative; follow repository conventions.
+
+    /login
+    /dashboard
+    /routers
+    /routers/{router}/connection-test
+    /routers/{router}/capabilities
+    /hotspot/profiles
+    /hotspot/vouchers
+    /hotspot/vouchers/create
+    /hotspot/batches/{batch}
+    /hotspot/sessions
+    /sales
+    /sales/create
+    /sales/{sale}
+    /print/vouchers/{batch}
+    /print/sales/{sale}
+    /members
+    /members/{member}
+    /members/{member}/accounts
+    /pppoe/accounts
+    /pppoe/accounts/{account}
+    /pppoe/sessions
+    /access-points
+    /access-points/{ap}
+    /reconciliation
+    /reconciliation/{issue}
+    /audit-logs
+    /portal/qr/{opaqueToken}
+
+The public portal route must be separated from authenticated admin routes and must have a narrow, explicit purpose.
+
+------------------------------------------------------------------------
+
+15. Acceptance criteria
+
+Router connection
+
+-   ☐ Admin can configure a RouterOS API-SSL connection.
+-   ☐ Test connection shows authentication, TLS, RouterOS version, identity, and capability results separately.
+-   ☐ The app does not require the MikroTik admin account.
+-   ☐ A router that is offline is marked stale/offline without deleting cached records.
+
+Profiles and voucher generation
+
+-   ☐ App reads existing Hotspot profiles from RouterOS.
+-   ☐ Voucher form only allows selecting a profile that currently exists.
+-   ☐ Bulk generation checks username uniqueness in both Laravel and RouterOS.
+-   ☐ Generated RouterOS users include a stable L-Net app UUID comment marker.
+-   ☐ Successful creation is verified by reading the user back from RouterOS.
+-   ☐ Partial failures are visible and can be retried without duplicate accounts.
+-   ☐ No script/scheduler/on-login script is generated per voucher.
+
+Sales and printing
+
+-   ☐ A ready voucher can be allocated to a sale only once.
+-   ☐ Sale records include cashier, payment method/status, total, and voucher allocation.
+-   ☐ Paid/pending/void states are distinct.
+-   ☐ Thermal 58 mm and A4 print layouts render correctly in browser print preview.
+-   ☐ Reprinting does not regenerate voucher credentials and creates an audit record.
+
+Members and PPPoE
+
+-   ☐ One member can have multiple Hotspot and PPPoE accounts.
+-   ☐ Member matching is by Laravel member/account relationship, not MAC.
+-   ☐ Operator can disconnect a specific active session without deleting its account.
+-   ☐ PPPoE secrets can be created/updated/disabled using an existing PPP profile.
+-   ☐ Existing passwords are not revealed by default.
+
+AP and session monitoring
+
+-   ☐ AP inventory supports manually entered management IP and ping/HTTP(S) health-check configuration.
+-   ☐ AP health checks run from Laravel and persist status, latency, timestamps, and failures without installing scripts on APs or creating per-AP RouterOS Netwatch entries.
+-   ☐ Health states distinguish Online, Degraded, Offline, Unknown, and Stale; an ICMP-blocked AP can use HTTP(S)/TCP checks.
+-   ☐ When enabled, the app reads /interface/bridge/host and maps client MAC to AP only if the bridge port uniquely identifies that AP.
+-   ☐ Shared unmanaged switch/uplink and AP router/NAT topologies display Unknown AP instead of a guessed AP.
+-   ☐ Private/random MAC is treated as a current-session observation, not a permanent device identity.
+
+Reconciliation
+
+-   ☐ App detects app-managed RouterOS users that are missing or changed.
+-   ☐ A failed router poll never creates a false missing_on_router issue for every account.
+-   ☐ App shows expected and actual values before repair.
+-   ☐ No destructive repair runs without an explicit operator action.
+-   ☐ Every repair has before/after audit data and a post-write verification.
+
+Random MAC
+
+-   ☐ A member can log in again with the same account after the observed MAC changes.
+-   ☐ The system does not create a new member merely because a new MAC appears.
+-   ☐ The system does not automatically merge different members by MAC.
+-   ☐ MAC observations are timestamped and labelled as observed/unverified.
+
+UI quality
+
+-   ☐ Core operations do not use decorative fake charts or generic gradient hero blocks.
+-   ☐ Tables have loading, empty, stale, and error states.
+-   ☐ Destructive/disruptive actions have clear confirmation.
+-   ☐ Cashier flow is usable on desktop/tablet without excessive navigation.
+
+------------------------------------------------------------------------
+
+16. Implementation plan for Antigravity
+
+Build incrementally. Do not generate every module in one pass.
+
+Phase 0 — Repository and environment inspection
+
+1.  Inspect the existing repository, Laravel version, PHP version, database, frontend stack, authentication, and current coding conventions.
+2.  Do not replace or upgrade a working stack without reporting the reason first.
+3.  Create an implementation checklist and identify required dependencies.
+4.  Build the RouterOS connection test as a small isolated proof of concept before implementing write operations.
+
+Deliverable: repository assessment, environment assumptions, architecture decisions, and connection proof of concept.
+
+Phase 1 — Foundation and read-only router integration
+
+1.  Authentication, roles, permissions, base layout, and application settings.
+2.  Router connection CRUD with encrypted credentials.
+3.  API-SSL transport adapter and capability detection.
+4.  Read-only RouterOS identity/resource/profile/session screens.
+5.  Queue, scheduler, locks, sync-run logging, and stale/offline state.
+
+Exit condition: the app can read router data reliably without making configuration changes.
+
+Phase 2 — Voucher inventory and provisioning
+
+1.  Profile mirror and profile selector.
+2.  Voucher batches and collision-safe username generator.
+3.  RouterOS user creation with UUID comment marker.
+4.  Read-back verification, retry, and partial-failure handling.
+5.  Reconciliation for Hotspot users.
+
+Exit condition: create and verify a batch of vouchers without generating RouterOS scripts.
+
+Phase 3 — Sales and print
+
+1.  Cashier/operator workflow.
+2.  Sales, sale items, voucher allocation, payment statuses, and receipt numbering.
+3.  Voucher 58 mm, receipt 58 mm, and A4 print templates.
+4.  QR generation and reprint audit.
+
+Exit condition: operator can sell, print, and reprint a voucher safely.
+
+Phase 4 — Members and PPPoE
+
+1.  Member CRUD and network account relationships.
+2.  Hotspot member actions and explicit disconnect/reset operations.
+3.  PPP profile mirror, secret CRUD, active sessions, and specific-session disconnect.
+4.  Member history and audit timeline.
+
+Exit condition: a member can be managed without relying on MAC identity.
+
+Phase 5 — AP health, optional AP-client mapping, and QR login
+
+1.  Build AP inventory with manually configured management IP, health-check type, timeout, polling interval, and failure threshold.
+2.  Implement Laravel-originated ICMP ping and HTTP/HTTPS checks with history, latency, and Online/Degraded/Offline/Unknown/Stale states.
+3.  Read MikroTik /interface/bridge/host and correlate live Hotspot session MACs to known bridge ports only when the AP is in bridge mode and has a unique MikroTik-facing port.
+4.  Explicitly test and label shared-unmanaged-switch and AP-router/NAT topologies as Unknown AP when exact mapping is impossible.
+5.  Keep wireless registration/CAPsMAN as optional future adapters, not prerequisites.
+6.  QR voucher landing page.
+7.  Custom Hotspot login page integration and one-time QR auto-login behind a feature flag.
+8.  Test with actual Android and iOS devices and the deployed RouterOS version.
+
+Exit condition: all configured APs can be health-checked without AP-side agents; any AP-client mapping is confidence-labelled and validated against the actual wiring; unsupported topologies display Unknown AP; QR login is proven end-to-end before being enabled for customers.
+
+Phase 6 — Hardening and release
+
+1.  Load and failure tests for bulk voucher creation and router outages.
+2.  Permission review and audit-log verification.
+3.  Database backup/restore test.
+4.  Print validation on the actual 58 mm printer and A4 printer.
+5.  Deployment guide, environment template, queue/scheduler service definitions, and operator manual.
+
+------------------------------------------------------------------------
+
+17. Coding-agent instructions
+
+When implementing this specification:
+
+1.  Inspect the repository before editing files. Preserve its established structure and conventions.
+2.  Implement a working vertical slice at a time. Do not create placeholder pages that look complete but have no backend behavior.
+3.  Keep RouterOS protocol code inside the transport/adaptor layer.
+4.  Use Form Requests, validation, policies/permissions, service classes, queue jobs, database transactions, and tests where appropriate.
+5.  Every RouterOS write must be an explicit typed operation with input validation and audit logging. Never expose arbitrary CLI/API command execution to the UI.
+6.  Never create one RouterOS script or scheduler per Hotspot user.
+7.  Never use MAC address as a member primary key or permanent device ID.
+8.  Never overwrite/delete RouterOS accounts automatically during reconciliation.
+9.  Never mark an operation successful before a read-back confirms it.
+10. Never put credentials or QR secrets in logs, URLs, frontend bundles, or normal API responses.
+11. Add automated tests for duplicate voucher generation, partial RouterOS failures, stale sync, missing records, permission checks, sale allocation, QR expiry/reuse, and print data.
+12. Use realistic labels and actual database-backed metrics. Do not fabricate dashboard numbers or charts.
+13. Keep the visual design disciplined and operational. Follow the anti-slop direction in Section 10.
+14. At the end of each phase, report files changed, migrations created, commands to run, tests executed, and any unverified RouterOS assumptions.
+
+------------------------------------------------------------------------
+
+18. RouterOS references
+
+Use official MikroTik documentation as the source of truth and confirm behavior against the deployed RouterOS version:
+
+-   RouterOS API — API protocol and TCP 8728/8729 services.
+-   RouterOS REST API — REST availability from RouterOS v7.1beta4 and HTTPS requirements.
+-   HotSpot — Captive portal — Hotspot users, profiles, active sessions, login methods, and walled garden.
+-   HotSpot customisation — custom login page and CHAP challenge handling.
+-   PPP AAA — PPP profiles, secrets, active sessions, and RADIUS concepts.
+-   WiFi — new WiFi registration table, CAPsMAN and remote CAP information.
+-   Wireless Interface — legacy wireless registration table (optional only).
+-   RouterOS Bridging and Switching — Hosts Table — documents /interface/bridge/host, mac-address, and on-interface.
+-   RouterOS Netwatch — alternative RouterOS probe capability; L-Net Access should perform AP health checks from Laravel by default, not install per-AP Netwatch scripts.
+
+Random/private MAC references:
+
+-   Android Open Source Project — MAC randomization behavior
+-   Apple Support — Use private Wi-Fi addresses
+
+------------------------------------------------------------------------
+
+19. Final product decision summary
+
+-   Application name: L-Net Access.
+-   Primary connection: MikroTik RouterOS API-SSL on TCP 8729, from the same LAN, with TLS certificate verification.
+-   Secondary connection: RouterOS REST over HTTPS when supported; SSH is not the primary integration.
+-   Router workload strategy: Laravel bulk polling + queues + local mapping + reconciliation. No script per voucher/member.
+-   Identity strategy: member ID and network-account username are stable; MAC is only an observed/session attribute.
+-   Voucher strategy: create from existing RouterOS Hotspot profiles, add an app UUID comment marker, verify each create, and keep sales state in Laravel.
+-   Monitoring strategy: AP health is checked directly by Laravel using ICMP ping/HTTP(S)/optional TCP; Hotspot sessions are read from RouterOS; AP-client mapping is optional and uses /interface/bridge/host plus known topology. No CAPsMAN or AP API is assumed.
+-   QR strategy: opaque one-time token and custom Hotspot login integration; do not put plaintext credentials in the QR URL. Ship QR voucher display first if auto-login cannot be safely verified.
+-   Design strategy: compact, clear network operations UI with real data, strong tables, useful status states, and no decorative dashboard slop.

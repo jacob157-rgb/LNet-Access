@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="pragma" content="no-cache">
+    <meta http-equiv="expires" content="-1">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AgungWifi Hotspot - Masuk</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="shortcut icon" href="favicon.ico" type="image/x-icon">
+</head>
+<body>
+
+    $(if chap-id)
+    <form name="sendin" action="$(link-login-only)" method="post" style="display:none">
+        <input type="hidden" name="username" />
+        <input type="hidden" name="password" />
+        <input type="hidden" name="dst" value="$(link-orig)" />
+        <input type="hidden" name="popup" value="true" />
+    </form>
+    <script src="md5.js"></script>
+    <script>
+        function doLogin() {
+            document.sendin.username.value = document.login.username.value;
+            document.sendin.password.value = hexMD5('$(chap-id)' + document.login.password.value + '$(chap-challenge)');
+            document.sendin.submit();
+            return false;
+        }
+    </script>
+    $(endif)
+
+    <div class="container">
+        <div class="card">
+            <!-- Header -->
+            <div class="header">
+                <div class="logo-wrap">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+                        <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
+                        <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+                        <line x1="12" y1="20" x2="12.01" y2="20"></line>
+                    </svg>
+                </div>
+                <h1>AgungWifi</h1>
+                <p>Koneksi Internet Cepat &amp; Stabil</p>
+                
+                <div class="info-chips">
+                    <span class="chip">IP: $(ip)</span>
+                    <span class="chip">MAC: $(mac)</span>
+                </div>
+            </div>
+
+            <!-- Error Banner -->
+            $(if error)
+            <div class="alert alert-danger" id="errorBanner">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0; margin-top:2px;">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+                <div id="errorText">$(error)</div>
+            </div>
+            $(endif)
+
+            <!-- Status Auto-Connecting Notice -->
+            <div class="alert alert-success" id="autoConnectBanner" style="display:none">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+                <div id="autoConnectText">Menghubungkan otomatis...</div>
+            </div>
+
+            <!-- Link ke Aplikasi Docker LNet-Access -->
+            <div style="margin-bottom: 14px;">
+                <a href="http://agungwifi.net:8080/portal" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 42px; border-radius: 12px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #ffffff; font-weight: 700; font-size: 13px; text-decoration: none; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+                        <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
+                        <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+                        <line x1="12" y1="20" x2="12.01" y2="20"></line>
+                    </svg>
+                    <span>Buka Portal AgungWifi (App Docker)</span>
+                </a>
+            </div>
+
+            <!-- Login Tabs -->
+            <div class="tabs">
+                <button type="button" class="tab-btn active" id="tabVoucherBtn" onclick="switchTab('voucher')">Voucher</button>
+                <button type="button" class="tab-btn" id="tabMemberBtn" onclick="switchTab('member')">Member</button>
+            </div>
+
+            <!-- Primary Form -->
+            <form name="login" action="$(link-login-only)" method="post" $(if chap-id) onSubmit="return doLogin()" $(endif)>
+                <input type="hidden" name="dst" value="$(link-orig)" />
+                <input type="hidden" name="popup" value="true" />
+                <input type="hidden" name="username" id="realUsername" value="$(username)" />
+                <input type="hidden" name="password" id="realPassword" />
+
+                <!-- Voucher View -->
+                <div id="voucherSection">
+                    <div class="form-group">
+                        <label for="voucherCode">KODE VOUCHER</label>
+                        <input type="text" id="voucherCode" class="form-input voucher-input" placeholder="contoh: vc-462" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="syncVoucherInput(this.value)">
+                    </div>
+                </div>
+
+                <!-- Member View -->
+                <div id="memberSection" style="display:none">
+                    <div class="form-group">
+                        <label for="memberUser">USERNAME</label>
+                        <div class="input-icon-wrap">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                                <circle cx="12" cy="7" r="4"></circle>
+                            </svg>
+                            <input type="text" id="memberUser" class="form-input" placeholder="Username Member" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" oninput="syncMemberUser(this.value)">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="memberPass">PASSWORD</label>
+                        <div class="input-icon-wrap">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                            </svg>
+                            <input type="password" id="memberPass" class="form-input" placeholder="Password Member" oninput="syncMemberPass(this.value)">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Submit Button -->
+                <button type="submit" class="btn btn-primary" id="btnSubmit">
+                    <span>Masuk Internet</span>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                        <polyline points="12 5 19 12 12 19"></polyline>
+                    </svg>
+                </button>
+            </form>
+
+            <!-- QR Code Button pointing to personal WebQR -->
+            <a href="https://jacob157-rgb.github.io/myqr/?dns=agungwifi.net" class="btn btn-qr" id="btnWebQr">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="7" height="7"></rect>
+                    <rect x="14" y="3" width="7" height="7"></rect>
+                    <rect x="14" y="14" width="7" height="7"></rect>
+                    <rect x="3" y="14" width="7" height="7"></rect>
+                </svg>
+                <span>📷 Scan QR Voucher</span>
+            </a>
+
+            <!-- Tips Scan -->
+            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:10px; margin-top:10px; font-size:11px; color:#64748b; line-height:1.4;">
+                <div style="font-weight:700; color:#334155; margin-bottom:4px; display:flex; align-items:center; gap:4px;">
+                    <span>💡 Tips Scan QR:</span>
+                </div>
+                <span>Bisa scan langsung menggunakan <b>Aplikasi Kamera bawaan HP / Google Lens</b> ke kertas voucher, lalu ketuk link yang muncul untuk login otomatis.</span>
+            </div>
+
+            <!-- Trial Option (if enabled) -->
+            $(if trial == 'yes')
+            <div style="text-align:center; margin-top:12px;">
+                <a href="$(link-login-only)?dst=$(link-orig-esc)&amp;username=T-$(mac-esc)" style="font-size:12px; color:var(--primary); text-decoration:none; font-weight:600;">
+                    🎁 Coba Gratis (Free Trial)
+                </a>
+            </div>
+            $(endif)
+
+            <!-- Price List / Paket -->
+            <div class="price-section">
+                <div class="price-title">
+                    <span>Daftar Paket Internet</span>
+                    <span style="font-size:10px; color:var(--accent);">PILIHAN HEMAT</span>
+                </div>
+                <div class="price-grid">
+                    <div class="price-card">
+                        <div class="p-val">Rp 2.000</div>
+                        <div class="p-name">12 Jam (Aktif)</div>
+                    </div>
+                    <div class="price-card">
+                        <div class="p-val">Rp 3.000</div>
+                        <div class="p-name">24 Jam (1 Hari)</div>
+                    </div>
+                    <div class="price-card">
+                        <div class="p-val">Rp 10.000</div>
+                        <div class="p-name">7 Hari (1 Minggu)</div>
+                    </div>
+                    <div class="price-card">
+                        <div class="p-val">Rp 30.000</div>
+                        <div class="p-name">31 Hari (1 Bulan)</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="footer">
+                <p>&copy; AgungWifi &bull; Didukung MikroTik RouterOS</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- QR SCANNER MODAL -->
+    <div class="modal-overlay" id="qrModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Scan QR Voucher</h3>
+                <button type="button" class="modal-close" onclick="closeQrModal()">&times;</button>
+            </div>
+
+            <!-- Camera Viewfinder Box -->
+            <div class="camera-box" id="cameraBox">
+                <video id="qrVideo" playsinline muted></video>
+                <div class="scan-frame" id="scanFrame"></div>
+                <div class="scan-laser" id="scanLaser"></div>
+                <canvas id="qrCanvas" style="display:none;"></canvas>
+            </div>
+
+            <p class="modal-notice" id="qrStatusText">Mengarahkan kamera ke kode QR...</p>
+
+            <!-- Native Camera / File Capture Fallback (Works 100% on HTTP & all devices) -->
+            <label class="btn-file-snap" id="btnSnapLabel">
+                <span>📷 Buka Kamera HP / Pilih Foto</span>
+                <input type="file" id="qrFileInput" accept="image/*" capture="environment" style="display:none" onchange="handleQrFile(this)">
+            </label>
+        </div>
+    </div>
+
+    <!-- Local Offline QR Decoder -->
+    <script src="js/jsQR.min.js"></script>
+
+    <script>
+        var currentTab = 'voucher';
+        var videoStream = null;
+        var isScanning = false;
+
+        // Friendly error messages in Indonesian
+        (function translateErrors() {
+            var banner = document.getElementById('errorText');
+            if (!banner) return;
+            var text = banner.textContent.trim().toLowerCase();
+            if (text.indexOf('user') !== -1 && text.indexOf('not found') !== -1) {
+                banner.textContent = 'Kode voucher tidak ditemukan atau salah.';
+            } else if (text.indexOf('uptime limit') !== -1) {
+                banner.textContent = 'Masa aktif voucher telah habis.';
+            } else if (text.indexOf('simultaneous session') !== -1) {
+                banner.textContent = 'Voucher sudah digunakan di perangkat lain.';
+            } else if (text.indexOf('invalid username') !== -1 || text.indexOf('password') !== -1) {
+                banner.textContent = 'Username atau password yang dimasukkan salah.';
+            } else if (text.indexOf('transfer limit') !== -1) {
+                banner.textContent = 'Batas kuota data voucher telah habis.';
+            }
+        })();
+
+        // Tab Switching
+        function switchTab(tab) {
+            currentTab = tab;
+            var vSection = document.getElementById('voucherSection');
+            var mSection = document.getElementById('memberSection');
+            var vBtn = document.getElementById('tabVoucherBtn');
+            var mBtn = document.getElementById('tabMemberBtn');
+            var realUser = document.getElementById('realUsername');
+            var realPass = document.getElementById('realPassword');
+
+            if (tab === 'voucher') {
+                vSection.style.display = 'block';
+                mSection.style.display = 'none';
+                vBtn.classList.add('active');
+                mBtn.classList.remove('active');
+                syncVoucherInput(document.getElementById('voucherCode').value);
+                document.getElementById('voucherCode').focus();
+            } else {
+                vSection.style.display = 'none';
+                mSection.style.display = 'block';
+                vBtn.classList.remove('active');
+                mBtn.classList.add('active');
+                realUser.value = document.getElementById('memberUser').value;
+                realPass.value = document.getElementById('memberPass').value;
+                document.getElementById('memberUser').focus();
+            }
+        }
+
+        function syncVoucherInput(val) {
+            val = (val || '').trim().toLowerCase();
+            document.getElementById('voucherCode').value = val;
+            document.getElementById('realUsername').value = val;
+            document.getElementById('realPassword').value = val;
+        }
+
+        function syncMemberUser(val) {
+            val = (val || '').trim().toLowerCase();
+            document.getElementById('memberUser').value = val;
+            document.getElementById('realUsername').value = val;
+        }
+
+        function syncMemberPass(val) {
+            document.getElementById('realPassword').value = val;
+        }
+
+        // AUTO-LOGIN IF URL CONTAINS CREDENTIALS (e.g. from WebQR or Native Phone Camera App)
+        window.addEventListener('DOMContentLoaded', function() {
+            var params = new URLSearchParams(window.location.search);
+            var u = params.get('username') || params.get('user') || params.get('voucher');
+            var p = params.get('password') || params.get('pass') || u;
+
+            if (u) {
+                u = decodeURIComponent(u).trim().toLowerCase();
+                p = decodeURIComponent(p);
+                document.getElementById('realUsername').value = u;
+                document.getElementById('realPassword').value = p;
+                var vInput = document.getElementById('voucherCode');
+                if (vInput) vInput.value = u;
+
+                var banner = document.getElementById('autoConnectBanner');
+                var text = document.getElementById('autoConnectText');
+                if (banner && text) {
+                    text.textContent = 'Voucher terdeteksi (' + u + '). Sedang login...';
+                    banner.style.display = 'flex';
+                }
+
+                setTimeout(function() {
+                    if (typeof doLogin === 'function') {
+                        doLogin();
+                    } else {
+                        document.login.submit();
+                    }
+                }, 300);
+            }
+        });
+
+        // QR SCANNER LOGIC
+        function openQrModal() {
+            var modal = document.getElementById('qrModal');
+            modal.classList.add('active');
+            startCamera();
+        }
+
+        function closeQrModal() {
+            stopCamera();
+            var modal = document.getElementById('qrModal');
+            modal.classList.remove('active');
+        }
+
+        function startCamera() {
+            var video = document.getElementById('qrVideo');
+            var statusText = document.getElementById('qrStatusText');
+            var scanLaser = document.getElementById('scanLaser');
+            var scanFrame = document.getElementById('scanFrame');
+
+            statusText.textContent = "Mengakses kamera...";
+
+            // Check WebRTC camera availability
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: "environment" }
+                }).then(function(stream) {
+                    videoStream = stream;
+                    video.srcObject = stream;
+                    video.setAttribute("playsinline", true);
+                    video.style.display = "block";
+                    scanLaser.style.display = "block";
+                    scanFrame.style.display = "block";
+                    video.play();
+                    isScanning = true;
+                    statusText.textContent = "Arahkan kamera ke QR code voucher...";
+                    requestAnimationFrame(scanVideoFrame);
+                }).catch(function(err) {
+                    // Fallback to camera snapshot upload if getUserMedia fails (e.g. plain HTTP policy)
+                    video.style.display = "none";
+                    scanLaser.style.display = "none";
+                    scanFrame.style.display = "none";
+                    statusText.textContent = "Gunakan tombol di bawah untuk membuka kamera / foto voucher.";
+                });
+            } else {
+                video.style.display = "none";
+                scanLaser.style.display = "none";
+                scanFrame.style.display = "none";
+                statusText.textContent = "Gunakan tombol di bawah untuk membuka kamera / foto voucher.";
+            }
+        }
+
+        function stopCamera() {
+            isScanning = false;
+            if (videoStream) {
+                videoStream.getTracks().forEach(function(track) {
+                    track.stop();
+                });
+                videoStream = null;
+            }
+        }
+
+        function scanVideoFrame() {
+            if (!isScanning) return;
+            var video = document.getElementById('qrVideo');
+            var canvas = document.getElementById('qrCanvas');
+
+            if (video.readyState === video.HAVE_ENOUGH_DATA && typeof jsQR === 'function') {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                var ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                var code = jsQR(imgData.data, imgData.width, imgData.height, {
+                    inversionAttempts: "dontInvert"
+                });
+
+                if (code && code.data) {
+                    onQrCodeScanned(code.data);
+                    return;
+                }
+            }
+
+            if (isScanning) {
+                requestAnimationFrame(scanVideoFrame);
+            }
+        }
+
+        // Handle Photo Snapshot (Works 100% on HTTP and all mobile devices)
+        function handleQrFile(input) {
+            if (!input.files || input.files.length === 0) return;
+            var file = input.files[0];
+            var statusText = document.getElementById('qrStatusText');
+            statusText.textContent = "Memproses gambar voucher...";
+
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                var img = new Image();
+                img.onload = function() {
+                    var canvas = document.getElementById('qrCanvas');
+                    var ctx = canvas.getContext('2d');
+                    
+                    // Downscale if too large to ensure fast decoding
+                    var maxDim = 800;
+                    var w = img.width;
+                    var h = img.height;
+                    if (w > maxDim || h > maxDim) {
+                        if (w > h) {
+                            h = Math.round((h * maxDim) / w);
+                            w = maxDim;
+                        } else {
+                            w = Math.round((w * maxDim) / h);
+                            h = maxDim;
+                        }
+                    }
+
+                    canvas.width = w;
+                    canvas.height = h;
+                    ctx.drawImage(img, 0, 0, w, h);
+                    var imgData = ctx.getImageData(0, 0, w, h);
+                    var code = jsQR(imgData.data, imgData.width, imgData.height);
+
+                    if (code && code.data) {
+                        onQrCodeScanned(code.data);
+                    } else {
+                        statusText.textContent = "QR Code tidak terbaca. Pastikan gambar jelas & coba lagi.";
+                    }
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // Process Scanned QR Payload
+        function onQrCodeScanned(raw) {
+            stopCamera();
+            closeQrModal();
+
+            var u = '';
+            var p = '';
+
+            // 1. Check if payload is a URL
+            if (raw.indexOf('http://') === 0 || raw.indexOf('https://') === 0 || raw.indexOf('/login') !== -1 || raw.indexOf('username=') !== -1) {
+                try {
+                    var url = new URL(raw, window.location.origin);
+                    u = url.searchParams.get('username') || url.searchParams.get('user') || url.searchParams.get('voucher') || '';
+                    p = url.searchParams.get('password') || url.searchParams.get('pass') || u;
+                } catch(e) {
+                    var matchUser = raw.match(/[?&](?:username|user|voucher)=([^&]+)/i);
+                    var matchPass = raw.match(/[?&](?:password|pass)=([^&]+)/i);
+                    if (matchUser) u = decodeURIComponent(matchUser[1]);
+                    if (matchPass) p = decodeURIComponent(matchPass[1]);
+                    if (!p) p = u;
+                }
+            } else if (raw.indexOf(':') !== -1) {
+                var parts = raw.split(':');
+                u = parts[0].trim().toLowerCase();
+                p = parts[1].trim();
+            } else {
+                // Single voucher code -> strictly lowercase
+                u = raw.trim().toLowerCase();
+                p = raw.trim().toLowerCase();
+            }
+
+            if (!u) {
+                alert('Kode QR tidak valid atau kosong.');
+                return;
+            }
+
+            // Fill form inputs
+            document.getElementById('realUsername').value = u;
+            document.getElementById('realPassword').value = p;
+            document.getElementById('voucherCode').value = u;
+
+            // Show feedback
+            var banner = document.getElementById('autoConnectBanner');
+            var text = document.getElementById('autoConnectText');
+            if (banner && text) {
+                text.textContent = 'QR Berhasil Dipindai (' + u + ')! Menghubungkan...';
+                banner.style.display = 'flex';
+            }
+
+            // Haptic vibration feedback if device supports it
+            if (navigator.vibrate) {
+                navigator.vibrate(80);
+            }
+
+            // Auto-submit login
+            setTimeout(function() {
+                if (typeof doLogin === 'function') {
+                    doLogin();
+                } else {
+                    document.login.submit();
+                }
+            }, 350);
+        }
+    </script>
+</body>
+</html>
