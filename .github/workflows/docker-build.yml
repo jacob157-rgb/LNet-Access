@@ -43,12 +43,6 @@ jobs:
             echo "Pre-built production assets found in public/build."
           fi
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -56,23 +50,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jacob157-rgb/lnet-access
-          tags: |
-            type=raw,value=latest
-            type=sha,format=short
+      - name: Build Docker Image (x86_64 / amd64)
+        run: |
+          docker build --platform linux/amd64 \
+            -t ghcr.io/jacob157-rgb/lnet-access:latest \
+            -t ghcr.io/jacob157-rgb/lnet-access:${{ github.sha }} \
+            -f Dockerfile .
 
-      - name: Build and push Docker image (linux/amd64)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Push Docker Image to GHCR
+        run: |
+          docker push ghcr.io/jacob157-rgb/lnet-access:latest
+          docker push ghcr.io/jacob157-rgb/lnet-access:${{ github.sha }}
