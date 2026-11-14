@@ -1,7 +1,6 @@
 node_modules
 .git
 .github
-.env.example
 .phpunit.result.cache
 tests
 npm-debug.log
@@ -9,5 +8,4 @@ yarn-error.log
 .idea
 .vscode
 Dockerfile*
-docker
 *.md
